@@ -1,3 +1,4 @@
+
 import os
 import shutil
 import ntpath
@@ -14,6 +15,14 @@ from tkinter.filedialog import askdirectory
 from tkinter import messagebox
 from zipfile import ZipFile
 
+# The code for finding the differences in the images is "borrowed" from Alison Américo:
+# https://github.com/alisonamerico/image-difference
+from skimage.metrics import structural_similarity  # scikit-image
+import imutils
+import cv2  # opencv-python
+
+from xor_export import xor_images
+
 # Definition of all layers to be recognized.
 # https://www.pcbway.com/helpcenter/technical_support/Gerber_File_Extention_from_Different_Software.html
 # Specify layer name, an array of patterns to look for, one pattern to dismiss.
@@ -22,7 +31,7 @@ from zipfile import ZipFile
 # another layer even if it happens to match a filter on a sequent layer.
 # It's important that the last layer is the outline of the pcb, since this is included in all layers when exporting
 # to png.
-filetypes = [
+filetypes = [ # [ 'GUI Layer Name', ['Patterns to look for', '...'], 'Pattern to dismiss']
                ['Top Solder Paste', ['*.gtp', '*-F?Paste.*', '*.crc', '*.tsp', '*.stp', '*.toppaste.gbr', '*.tcream.ger'], ''],
                ['Top Silk Screen', ['*.gto', '*-F?SilkS.*', '*.plc', '*.tsk', '*.sst', '*.topsilk.gbr', '*.topsilkscreen.ger', 'to'], ''],
                ['Top Solder Mask', ['*.gts', '*-F?Mask.*', '*.stc', '*.tsm', '*.smt', '*.topmask.gbr', '*.topsoldermask.ger', 'ts'], ''],
@@ -90,6 +99,13 @@ pcb_color_template = [
 
 # Color templates for exporting the gerbers to png.
 png_color_template = [
+                        ['Yellow and Blue on Black background',  # Template Name
+                        '#000000',    # Background
+                        '#FFFF00',    # Gerber 1 color
+                        '#0000FF',    # Gerber 2 color
+                        '#FFFF00',  # Gerber 1 color on the combined picture
+                        '#0000FF',  # Gerber 2 color on the combined picture
+                       ],
                        ['Green Copper Layers on White background',  # Template Name
                         '#FFFFFF',    # Background
                         '#00690B',    # Gerber 1 color
@@ -120,7 +136,8 @@ def write_settings_file():
 settings_object = ConfigParser()
 if not os.path.exists('settings.ini'):
     settings_object['PATHS'] = {'gerbv_path': '', 'grb_file1': '', 'grb_file2': '', 'png_export_path': ''}
-    settings_object['TEMPLATES'] = {'diff_color_combobox': 0, 'png_color_combobox': 0, 'gerber_color_combobox': 0}
+    settings_object['TEMPLATES'] = {'diff_color_combobox': 0, 'png_color_combobox': 0, 
+                                    'gerber_color_combobox': 0, 'xor_export': 0, 'red_rectangle_export': 0}
     settings_object['OTHER'] = {'png_export_dpi': '300'}
     write_settings_file()
 else:
@@ -392,19 +409,54 @@ png_export_dir_label = Label(root, text="")
 png_export_dir_label.grid(column=2, row=row, columnspan=3, sticky=W, padx=10)
 row = row + 1
 
-def export_layer(layer_index, sel):
-    print("Using png color template:", png_color_template[png_color_combobox.current()][0])
-    bg_color = png_color_template[png_color_combobox.current()][1]
+def export_layer(layer_index, sel: int, color_template = None, output_path = None) -> str:
+    """Export a layer to a png file.
+
+    Args:
+        layer_index (_type_): Index of the layer to export
+        sel (int): Select which gerber to export. 1=Gerber 1, 2=Gerber 2, combined=Both Gerber 1 and 2
+
+    Returns:
+        str: return the path to the exported png file
+    """
+    # Color settings for the png export. If no color template is supplied, use the one selected in the GUI.
+    # Following this structure:
+    # Template Name
+    # Background
+    # Gerber 1 color
+    # Gerber 2 color
+    # Gerber 1 color on the combined picture
+    # Gerber 2 color on the combined picture
+    
+    # This is a workaround, as the structure of this function is not well defined.
+                           
+    if color_template is None:
+        print("Using png color template:", png_color_template[png_color_combobox.current()][0])
+        bg_color = png_color_template[png_color_combobox.current()][1]
+        gerb1_layer_color = png_color_template[png_color_combobox.current()][2]
+        gerb2_layer_color = png_color_template[png_color_combobox.current()][3]
+        gerb1_comb_layer_col = png_color_template[png_color_combobox.current()][4]
+        gerb2_comb_layer_col = png_color_template[png_color_combobox.current()][5]
+    else:
+        bg_color = color_template[1]
+        gerb1_layer_color = color_template[2]
+        gerb2_layer_color = color_template[3]
+        gerb1_comb_layer_col = color_template[4]
+        gerb2_comb_layer_col = color_template[5]
+        
+    if output_path is None:
+        pass
+    
     if (sel == '1' or sel == '2'):
         if (sel=='1'):
             filename = firstgerbers[layer_index].get()
             path = gerber1_path
-            layer_color = png_color_template[png_color_combobox.current()][2]
+            layer_color = gerb1_layer_color
             outline_filename = firstgerbers[-1].get()  # Get filename of board outline layer
         elif (sel=='2'):
             filename = secondgerbers[layer_index].get()
             path = gerber2_path
-            layer_color = png_color_template[png_color_combobox.current()][3]
+            layer_color = gerb2_layer_color
             outline_filename = secondgerbers[-1].get()  # Get filename of board outline layer
         filepath = os.path.join(path, filename).replace("/", os.sep)
         outline_filepath = os.path.join(path, outline_filename).replace("/", os.sep)
@@ -414,12 +466,12 @@ def export_layer(layer_index, sel):
     if (sel == 'combined'):
         filename1 = firstgerbers[layer_index].get()
         path1 = gerber1_path
-        layer_color1 = png_color_template[png_color_combobox.current()][4]
+        layer_color1 = gerb1_comb_layer_col
         outline1_filename = firstgerbers[-1].get()  # Get filename of board outline layer
 
         filename2 = secondgerbers[layer_index].get()
         path2 = gerber2_path
-        layer_color2 = png_color_template[png_color_combobox.current()][5]
+        layer_color2 = gerb2_comb_layer_col
         outline2_filename = secondgerbers[-1].get()  # Get filename of board outline layer
 
         filepath1 = os.path.join(path1, filename1).replace("/", os.sep)
@@ -438,18 +490,17 @@ def export_layer(layer_index, sel):
     export_filename = filetypes[layer_index][0].replace(" ", "_") + "-" + sel + ".png"
     export_path = png_export_dir_label["text"]
     export_filepath = os.path.join(export_path, export_filename).replace("/", os.sep)
+        
     process_args.append("-o" + export_filepath)
 
     print("Starting GerbV with these args:", process_args)
     returncode = subprocess.call(process_args, stdin=None, stdout=None, stderr=None)
     print("GerbV process exited with code:", returncode)
+    return export_filepath
 
-def export_png():
-    # Save dpi setting
-    settings_other['png_export_dpi'] = png_dpi_entry.get()
-    write_settings_file()
-
-    export_result = "Png Export Result:\r\n"
+def export_only_png():
+    export_result = ''
+    exported_path_fn = {'gerber1': [], 'gerber2': [], 'combined': []} # List of exported path and filenames
     for index, layer in enumerate(filetypes):
         export_result = export_result + layer[0] + ": "
         if (firstgerbers[index].get() == "---" or secondgerbers[index].get() == "---"):
@@ -457,16 +508,25 @@ def export_png():
         else:
             export_png_status.configure(text="Exporting "+layer[0]+" Gerber 1")
             root.update()  # For the GUI to update
-            export_layer(index, '1')
+            e = export_layer(index, '1')
+            exported_path_fn['gerber1'].append(e)
             export_png_status.configure(text="Exporting "+layer[0]+" Gerber 2")
             root.update()  # For the GUI to update
-            export_layer(index, '2')
+            e = export_layer(index, '2')
+            exported_path_fn['gerber2'].append(e)
             export_png_status.configure(text="Exporting "+layer[0]+" Combined Gerber 1&2")
             root.update()  # For the GUI to update
-            export_layer(index, 'combined')
+            e = export_layer(index, 'combined')
+            exported_path_fn['combined'].append(e)
             export_png_status.configure(text="Finding differences in "+layer[0])
-            root.update()  # For the GUI to update
+            root.update()  # For the GUI to update            
+    return export_result, exported_path_fn
 
+def rename_exported_files():
+    # GZMC: No idea why this function does exist
+    image_list = []
+    for _, layer in enumerate(filetypes):
+        if (firstgerbers[index].get() != "---" and secondgerbers[index].get() != "---"): 
             img_path = png_export_dir_label["text"]
             img1_filename = layer[0].replace(" ", "_") + "-1.png"
             img2_filename = layer[0].replace(" ", "_") + "-2.png"
@@ -474,73 +534,201 @@ def export_png():
             img1 = os.path.join(img_path, img1_filename).replace("/", os.sep)
             img2 = os.path.join(img_path, img2_filename).replace("/", os.sep)
             img3 = os.path.join(img_path, img3_filename).replace("/", os.sep)
+            image_list.append({img1, img2, img3})
+            
+def copy_png_files():    
+    pass
 
-            # The code for finding the differences in the images is "borrowed" from Alison Américo:
-            # https://github.com/alisonamerico/image-difference
-            from skimage.metrics import structural_similarity  # scikit-image
-            import imutils
-            import cv2  # opencv-python
+def export_xor_png(exported_path_fn: dict[list]) -> dict[list]:
+    exported_path_fn['xor'] = []
+    for i in range(len(exported_path_fn['gerber1'])):
+        pn_for_xor = exported_path_fn['combined'][i].rstrip("-combined.png") + "-xor.png"
+        xor_images(exported_path_fn['gerber1'][i],  exported_path_fn['gerber2'][i], pn_for_xor)
+        exported_path_fn['xor'].append(pn_for_xor)
+    return exported_path_fn
+        
+# WARNING: THIS FUNCTION WAS ONLY COPIED; IT DOES NOT WORK AS OF NOW
+# TODO: FIX THIS FUNCTION, GZMC 2024-05-29. All of the images have to be loaded and compared. 
+def check_for_similarity(exported_path_fn: dict[list]):
+    # load the two input images
+    imageA = cv2.imread(img1)
+    imageB = cv2.imread(img2)
+    imageC = cv2.imread(img3)
 
-            # load the two input images
-            imageA = cv2.imread(img1)
-            imageB = cv2.imread(img2)
-            imageC = cv2.imread(img3)
+    h1, w1, c1 = imageA.shape
+    print("Resolution of", img1, "is", w1, "x", h1)
 
-            h1, w1, c1 = imageA.shape
-            print("Resolution of", img1, "is", w1, "x", h1)
+    h2, w2, c2 = imageB.shape
+    print("Resolution of", img2, "is", w2, "x", h2)
 
-            h2, w2, c2 = imageB.shape
-            print("Resolution of", img2, "is", w2, "x", h2)
+    # convert the images to grayscale
+    grayA = cv2.cvtColor(imageA, cv2.COLOR_BGR2GRAY)
+    grayB = cv2.cvtColor(imageB, cv2.COLOR_BGR2GRAY)
 
-            # convert the images to grayscale
-            grayA = cv2.cvtColor(imageA, cv2.COLOR_BGR2GRAY)
-            grayB = cv2.cvtColor(imageB, cv2.COLOR_BGR2GRAY)
+    if (h1 == h2 and w1 == w2):
+        try:
+            # compute the Structural Similarity Index (SSIM) between the two
+            # images, ensuring that the difference image is returned
+            (score, diff) = structural_similarity(grayA, grayB, full=True)
+            diff = (diff * 255).astype("uint8")
+            print("SSIM: {}".format(score))
 
-            if (h1 == h2 and w1 == w2):
-                try:
-                    # compute the Structural Similarity Index (SSIM) between the two
-                    # images, ensuring that the difference image is returned
-                    (score, diff) = structural_similarity(grayA, grayB, full=True)
-                    diff = (diff * 255).astype("uint8")
-                    print("SSIM: {}".format(score))
+            # threshold the difference image, followed by finding contours to
+            # obtain the regions of the two input images that differ
+            thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+            cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = imutils.grab_contours(cnts)
 
-                    # threshold the difference image, followed by finding contours to
-                    # obtain the regions of the two input images that differ
-                    thresh = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-                    cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    cnts = imutils.grab_contours(cnts)
+            # loop over the contours
+            for c in cnts:
+                # compute the bounding box of the contour and then draw the
+                # bounding box on both input images to represent where the two
+                # images differ
+                (x, y, w, h) = cv2.boundingRect(c)
+                cv2.rectangle(imageA, (x, y), (x + w, y + h), (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.rectangle(imageB, (x, y), (x + w, y + h), (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.rectangle(imageC, (x, y), (x + w, y + h), (0, 0, 255), 2, cv2.LINE_AA)
+                
 
-                    # loop over the contours
-                    for c in cnts:
-                        # compute the bounding box of the contour and then draw the
-                        # bounding box on both input images to represent where the two
-                        # images differ
-                        (x, y, w, h) = cv2.boundingRect(c)
-                        cv2.rectangle(imageA, (x, y), (x + w, y + h), (0, 0, 255), 2, cv2.LINE_AA)
-                        cv2.rectangle(imageB, (x, y), (x + w, y + h), (0, 0, 255), 2, cv2.LINE_AA)
-                        cv2.rectangle(imageC, (x, y), (x + w, y + h), (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.imwrite(img1, imageA)
+            cv2.imwrite(img2, imageB)
+            cv2.imwrite(img3, imageC)
 
-                    cv2.imwrite(img1, imageA)
-                    cv2.imwrite(img2, imageB)
-                    cv2.imwrite(img3, imageC)
+            export_result_msg = export_result_msg + "OK. Images are "+format(round(score*100,2))+"% equal.\r\n"
+        except Exception as e:
+            print("Unable to compare", img1, "and", img2, "Error:", e)
+            export_result_msg = export_result_msg+"Failed to compare images. Error: "+str(e)+"\r\n"
+    else:
+        print("Images does not have the same resolution. Not able to compare", img1, "and", img2)
+        export_result_msg = export_result_msg+"Image 1 and 2 has different resolutions.\r\n"
+        
+        
+def export_detail_view_fn(exported_path_fn: dict[list], min_cropped_image_size_px: tuple = (100, 100)):
+    _export_path = os.path.join(png_export_dir_label["text"], "detail_view")
+    if not os.path.exists(_export_path):
+        os.mkdir(_export_path)
+    result = ''
+    for i in range(len(exported_path_fn['gerber1'])):
+        imageA = cv2.imread(exported_path_fn['gerber1'][i].replace("/", os.sep))
+        imageB = cv2.imread(exported_path_fn['gerber2'][i].replace("/", os.sep))
+        if 'xor' in exported_path_fn:
+            if exported_path_fn['xor'][i] != '':
+                imageC = cv2.imread(exported_path_fn['xor'][i].replace("/", os.sep))
+        else:
+            imageC = cv2.imread(exported_path_fn['combined'][i].replace("/", os.sep))
+        h1, w1, c1 = imageA.shape
+        h2, w2, c2 = imageB.shape
+        
+        grayA = cv2.cvtColor(imageA, cv2.COLOR_BGR2GRAY)
+        grayB = cv2.cvtColor(imageB, cv2.COLOR_BGR2GRAY)
+        
+        if (h1 == h2 and w1 == w2):
+            try:
+                (score, diff) = structural_similarity(grayA, grayB, full=True)
+                #cv2.imwrite(os.path.join(_export_path, "diff.png"), diff)
+                diff = (diff * 255).astype("uint8")
+                cv2.imwrite(os.path.join(_export_path, "diff.png"), diff)
+                thresh = cv2.threshold(src = diff, 
+                                       thresh = 0, 
+                                       maxval = 255, 
+                                       type = cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+                
+                contours = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contours = imutils.grab_contours(contours)
+                
+                for i, c in enumerate(contours):
+                    (x, y, w, h) = cv2.boundingRect(c)
+                    # Check if the cropped image is smaller than the minimum size
+                    if w < min_cropped_image_size_px[0] or h < min_cropped_image_size_px[1]:
+                        # Check if the maximum size of this picture is exceeded with these dimensions
+                        if x+w > w1 or y+h > h1:
+                            if x+w > w1:
+                                w = w1-x
+                            if y+h > h1:
+                                h = h1-y
+                        else: # Else, set the size to the minimum size
+                            w = min_cropped_image_size_px[0]
+                            h = min_cropped_image_size_px[1] 
+                    cropped_image = imageC[y:y+h, x:x+w]
+                    cv2.imwrite(os.path.join(_export_path, f"diff{i}_at_x-{x}_y-{y}.png"), cropped_image)
+                    
+                result = result + "OK. Images are "+format(round(score*100,2))+"% equal.\r\n"
+                    
+            except Exception as e: 
+                result = result + "Failed to compare images. Error: "+str(e)+"\r\n"
+    return result
 
-                    export_result = export_result + "OK. Images are "+format(round(score*100,2))+"% equal.\r\n"
-                except Exception as e:
-                    print("Unable to compare", img1, "and", img2, "Error:", e)
-                    export_result = export_result+"Failed to compare images. Error: "+str(e)+"\r\n"
-            else:
-                print("Images does not have the same resolution. Not able to compare", img1, "and", img2)
-                export_result = export_result+"Image 1 and 2 has different resolutions.\r\n"
-    messagebox.showwarning("Info", export_result)
+    
+
+def export_png_but_action():
+    # Save dpi setting
+    settings_other['png_export_dpi'] = png_dpi_entry.get()
+    write_settings_file()
+
+    export_result_msg = "Png Export Result:\r\n"
+    export_result, exported_path_fn =  export_only_png()
+
+    export_result_msg = export_result_msg + export_result
+    # Check what the state of the checkboxes are
+    if export_xor.get() == 1:
+        export_png_status.configure(text="Exporting XOR images...")
+        root.update() 
+        exported_path_fn = export_xor_png(exported_path_fn)
+        export_result_msg = export_result_msg + "XOR images exported.\r\n"
+    
+    if export_detail_view.get() == 1:
+        export_png_status.configure(text="Exporting detail view images...")
+        root.update() 
+        export_detail_view_fn(exported_path_fn)
+        export_result_msg = export_result_msg + "Detail view images exported.\r\n"
+    
+    
+    #rename_exported_files()
+ 
+    export_png_status.configure(text="Export done.")
+    root.update()
+    # messagebox.showwarning("Info", export_result_msg)
     export_png_status.configure(text="")
 
 root.grid_rowconfigure(row, minsize=15)
 row = row + 1
 
-export_png_btn = Button(root, text='Export png', command=lambda: export_png())
+export_png_btn = Button(root, text='Export png', command=lambda: export_png_but_action())
 export_png_btn.grid(column=1, row=row, sticky=W, padx=10)
 export_png_status = Label(root, text="")
 export_png_status.grid(column=2, row=row, columnspan=3, sticky=W, padx=10)
+row = row + 1
+
+# Add checkboxes for XOR export and red line 
+
+def xor_export_onchange():
+    settings_templates['xor_export'] = str(export_xor.get())
+    write_settings_file()
+    
+def red_rectangle_export_onchange():
+    settings_templates['red_rectangle_export'] = str(export_red_rectangle.get())
+    write_settings_file()
+    
+def export_detail_view_onchange():
+    settings_templates['export_detail_view'] = str(export_detail_view.get())
+    write_settings_file()
+
+export_xor = IntVar()
+export_xor.set(settings_templates['xor_export'])
+export_xor_cb = Checkbutton(root, text="Export XOR", variable=export_xor, command=lambda: xor_export_onchange())
+export_xor_cb.grid(column=1, row=row, sticky=W, padx=10)
+row = row + 1
+
+export_red_rectangle = IntVar()
+export_red_rectangle.set(settings_templates['red_rectangle_export'])
+export_red_rect_cb = Checkbutton(root, text="Export red rectangle", variable=export_red_rectangle, command=lambda: red_rectangle_export_onchange())
+export_red_rect_cb.grid(column=1, row=row, sticky=W, padx=10)
+row = row + 1
+
+export_detail_view = IntVar()
+export_detail_view.set(settings_templates['export_detail_view'])
+export_detail_view_cb = Checkbutton(root, text="Export detail view", variable=export_detail_view, command=lambda: export_detail_view_onchange())
+export_detail_view_cb.grid(column=1, row=row, sticky=W, padx=10)
 row = row + 1
 
 # Add headline
@@ -644,3 +832,24 @@ else:
     open_gerber_file(gerber2_arg, 2)
 
 root.mainloop()
+
+
+# TODO:
+# Look whats causing this error. It occurs when trying to export the png file a second time during runtime.
+# Traceback (most recent call last):
+#   File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\tkinter\__init__.py", line 1967, in __call__
+#     return self.func(*args)
+#            ^^^^^^^^^^^^^^^^
+#   File "C:\repos\blead\GrbDiff\GrbDiff.py", line 541, in <lambda>
+#     export_png_btn = Button(root, text='Export png', command=lambda: export_png())
+#                                                                      ^^^^^^^^^^^^
+#   File "C:\repos\blead\GrbDiff\GrbDiff.py", line 493, in export_png
+#     h2, w2, c2 = imageB.shape
+#                  ^^^^^^^^^^^^
+# AttributeError: 'NoneType' object has no attribute 'shape'
+
+# TODO:
+# Add function to export XOR type file. Add checkbox to write setting. Add setting to setting file
+
+# TODO: 
+# Write print to conosole. Right now it only prints the commands and arguments when the program is closed.

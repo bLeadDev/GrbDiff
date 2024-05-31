@@ -1,3 +1,19 @@
+# Explaination
+
+This repo is adapted from the repo https://github.com/dennevi/GrbDiff 
+In this repo, there are some functionalities added like XOR export and detail view. The functions DO NOT work properly if uncarefully used. Use the functions as follows:
+
+## XOR export
+For XOR export, one must activate the "Yellow and Blue on Black background" in the png export field. If this is selected and the checkbox is ticked, the XOR export is done. As of now, there is no pure white but some kind of gray. 
+
+## Detail View
+To use the detail view, change the color theme in png export to "Green Copper Layers on White background". When this is selected and the detail view checkbox is ticked, there is a detail export done. A folder is created with a grayscale difference picture of all differences of both layers. As of now, every layer gets added here. This function was only tested with one layer checked. 
+
+# TODOs
+There are a lot of strange things going on. IMHO, it would be best to create a gerber diff and not to change this to PNGs already, so one could exactly see which lines are only in grb1, grb2 and in both of the files. Therefore, a structural analysis would be needed. With this approach a whole lot of information gets lost in every step. 
+
+# BELOW IS THE ORIGINAL EXPLAINATION FROM THE FORKED GIT REPO
+
 # GrbDiff - Visualize changes in Gerber files
 
 This is a wrapper for GerbV written in Python intended to make it easier for me to compare two versions of gerber files. I couldn\'t find a free and open-source diff-tool for gerber files so I threw togheter my own.
